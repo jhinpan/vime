@@ -1,8 +1,6 @@
 # Adapted from https://github.com/radixark/miles/blob/b133ce9cac3c8b4d9969d20d6a03117d545c2865/miles/kernels/attention/dsa/tilelang/sparse_attention_bwd.py
 # ruff: noqa
 # Adapt from https://github.com/tile-ai/tilelang/blob/4ff81c7d40803d269569e157e847623e84553f78/examples/deepseek_v32/sparse_mla_bwd.py
-import os
-
 import tilelang
 import torch
 from tilelang import language as T
@@ -126,7 +124,7 @@ def _sparse_attention_bwd_kernel(
 
     H = H_kv
     padded_H = max(tilelang.math.next_power_of_2(H_kv), 16)
-    is_rocm = os.getenv("MILES_HARDWARE_PLATFORM") == "rocm"
+    is_rocm = torch.version.hip is not None
     max_block_H = 32 if is_rocm and padded_H >= 64 else 64
     block_H = min(max_block_H, padded_H)
     assert padded_H % block_H == 0
@@ -157,6 +155,7 @@ def _sparse_attention_bwd_kernel(
             dQ_shared = T.alloc_shared([block_H, D], dtype)
 
             acc_p = T.alloc_fragment([block_H, BS], accum_dtype)
+            lse = T.alloc_fragment([block_H], accum_dtype)
             acc_dp = T.alloc_fragment([block_H, BS], accum_dtype)
             acc_dq = T.alloc_fragment([block_H, D], accum_dtype)
             acc_dkv = T.alloc_fragment([BS, D], accum_dtype)
@@ -176,6 +175,9 @@ def _sparse_attention_bwd_kernel(
             if D_tail > 0:
                 T.copy(Q[by, s_i, bz * block_H : (bz + 1) * block_H, D:], Q_tail_shared)
                 T.clear(acc_dq_tail)
+            # TileLang 0.1.10 HIP codegen cannot lower T.exp2 over a global load; keep Lse in a fragment.
+            for h_i in T.Parallel(block_H):
+                lse[h_i] = Lse[by, s_i, bz * block_H + h_i]
 
             # Process each block of indices
             for i_i in T.Pipelined(NS, num_stages=num_stages):
@@ -201,9 +203,7 @@ def _sparse_attention_bwd_kernel(
                     T.gemm(Q_tail_shared, KV_tail_shared, acc_p, transpose_B=True, policy=T.GemmWarpPolicy.FullCol)
 
                 for h_i, bi_i in T.Parallel(block_H, BS):
-                    acc_p[h_i, bi_i] = T.exp2(
-                        acc_p[h_i, bi_i] * sm_scale_mul_reciprocal_log2 - Lse[by, s_i, bz * block_H + h_i]
-                    )
+                    acc_p[h_i, bi_i] = T.exp2(acc_p[h_i, bi_i] * sm_scale_mul_reciprocal_log2 - lse[h_i])
 
                 T.copy(acc_p, P_shared_cast)
 

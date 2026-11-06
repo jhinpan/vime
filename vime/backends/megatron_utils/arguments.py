@@ -200,7 +200,8 @@ def _set_default_megatron_args(args):
         args.enable_hyper_connections = True
         args.experimental_attention_variant = "dsv4"
         args.dsv4_impl = "miles"
-        args.miles_dsa_topk_backend = getattr(args, "miles_dsa_topk_backend", None) or "canonical"
+        # The plugin's "canonical" top-k takes its proposal from SGLang's rollout kernel; vime rolls out with vLLM.
+        args.miles_dsa_topk_backend = "torch"
     return args
 
 

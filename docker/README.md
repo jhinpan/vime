@@ -42,3 +42,8 @@ Override `GPU_ARCH` with `--build-arg` for another supported architecture.
 The build applies shared vLLM patches from `docker/patch/latest/` with strict
 `git apply`, in CUDA's order; ROCm-only patches live in `docker/amd_patch/`.
 Keep `BASE_IMAGE` compatible with the shared patches.
+
+Megatron-LM comes from `radixark/Megatron-LM`, which adds the DeepSeek-V4 core
+(hyper-connections, compressed sparse attention) to NVIDIA Megatron-LM.
+`docker/amd_patch/latest/megatron_radixark.patch` is `docker/patch/latest/megatron.patch`
+rebased onto that fork; update both together.

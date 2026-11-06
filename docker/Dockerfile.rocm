@@ -8,7 +8,9 @@ FROM ${BASE_IMAGE}
 # ======================================== Arguments =============================================
 
 ARG PATCH_VERSION=latest
-ARG MEGATRON_COMMIT=1dcf0dafa884ad52ffb243625717a3471643e087
+# radixark/Megatron-LM miles-main: NVIDIA Megatron core 0.19 plus the DeepSeek-V4 core.
+ARG MEGATRON_REPO=https://github.com/radixark/Megatron-LM.git
+ARG MEGATRON_COMMIT=eb547f33e183479530cfb5428b7c665a110c785f
 ARG GPU_ARCH=gfx950
 
 # ROCm's prebuilt apex, from the wheel index matching the base image's ROCm.
@@ -62,22 +64,20 @@ RUN pip install --no-deps --no-cache-dir \
 
 # ======================================== Megatron-LM =========================
 
-# NVIDIA/Megatron-LM + docker/amd_patch/. The fork-after-HIP-init checkpoint
-# segfault is handled at runtime by vime.utils.rocm_checkpoint_writer.
-RUN git clone https://github.com/NVIDIA/Megatron-LM.git --recursive /root/Megatron-LM && \
+# radixark/Megatron-LM + docker/amd_patch/megatron_radixark.patch. The fork-after-HIP-init
+# checkpoint segfault is handled at runtime by vime.utils.rocm_checkpoint_writer.
+RUN git clone ${MEGATRON_REPO} --recursive /root/Megatron-LM && \
     cd /root/Megatron-LM && git checkout ${MEGATRON_COMMIT}
 
-COPY docker/amd_patch/${PATCH_VERSION}/megatron.patch /root/Megatron-LM/
-COPY docker/amd_patch/${PATCH_VERSION}/amd_megatron_fused_kernels_init.patch /root/Megatron-LM/
+COPY docker/amd_patch/${PATCH_VERSION}/megatron_radixark.patch /root/Megatron-LM/
 RUN cd /root/Megatron-LM && \
     git update-index --refresh && \
-    git apply megatron.patch --3way && \
-    git apply amd_megatron_fused_kernels_init.patch --3way && \
+    git apply megatron_radixark.patch --3way && \
     if grep -R -n '^<<<<<<< ' .; then \
       echo "Patch failed to apply cleanly. Please resolve conflicts." && \
       exit 1; \
     fi && \
-    rm megatron.patch amd_megatron_fused_kernels_init.patch && \
+    rm megatron_radixark.patch && \
     pip install -e . --no-deps
 
 # ====================================== Python dependencies ============================================
@@ -87,6 +87,13 @@ RUN pip install --no-cache-dir --ignore-installed PyJWT && \
 
 RUN pip install "git+https://github.com/fzyzcjy/torch_memory_saver.git@${TMS_COMMIT}" \
         --no-cache-dir --force-reinstall
+
+# DeepSeek-V4.1's TileLang kernels JIT-compile with the base image's TileLang (pinned by vLLM);
+# its fp32 MFMA GEMM lowering needs tilelang_mfma_dtype.patch. tile_kernels backs the FP8 QAT cast-back.
+COPY docker/amd_patch/${PATCH_VERSION}/tilelang_mfma_dtype.patch /tmp/
+RUN patch -p1 -d "$(python3 -c 'import site; print(site.getsitepackages()[0])')" < /tmp/tilelang_mfma_dtype.patch && \
+    rm /tmp/tilelang_mfma_dtype.patch && \
+    pip install --no-cache-dir --no-deps tile_kernels==1.0.0
 
 COPY requirements.txt /tmp/vime-requirements.txt
 RUN pip install --no-cache-dir -r /tmp/vime-requirements.txt
@@ -162,6 +169,7 @@ ENV PYTHONPATH=/root/vime:/root/Megatron-LM
 RUN python3 -c "\
 import torch, vllm, vime, transformer_engine, megatron.core; \
 import fake_int4_quant_cuda; \
+import tile_kernels.quant, vime_plugins.models.deepseek_v4_1.model; \
 from vllm.distributed.weight_transfer.ipc_engine import IPCWeightTransferEngine; \
 from vllm.entrypoints.scale_out.token_in_token_out.protocol import GenerateTokensChoice; \
 from vime.backends.vllm_utils.vllm_engine import VLLMEngine; \

@@ -1,0 +1,226 @@
+diff --git a/megatron/core/fusions/fused_mla_yarn_rope_apply.py b/megatron/core/fusions/fused_mla_yarn_rope_apply.py
+index 797a47b31..9bba0dd68 100644
+--- a/megatron/core/fusions/fused_mla_yarn_rope_apply.py
++++ b/megatron/core/fusions/fused_mla_yarn_rope_apply.py
+@@ -1369,7 +1369,7 @@ class _FusedMLARoPEKVSplit(torch.autograd.Function):
+         ctx.cp_size = cp_size
+         if cu_seqlens_kv is None:
+             o_key = o_key.view(max_seqlen, -1, nheads, emb_dim + k_dim)
+-            o_value = o_value.view(max_seqlen, -1, nheads, v_dim)
++            o_value = o_value.view(max_seqlen, batch_size, nheads, v_dim)
+         return o_key, o_value
+ 
+     @staticmethod
+@@ -1390,7 +1390,7 @@ class _FusedMLARoPEKVSplit(torch.autograd.Function):
+             # sbhd
+             max_seqlen, batch_size, nheads, _ = dk.shape
+             dk = dk.contiguous().view(-1, nheads, ctx.emb_dim + ctx.k_dim)
+-            dv = dv.contiguous().view(-1, nheads, ctx.v_dim)
++            dv = dv.contiguous().view(max_seqlen * batch_size, nheads, ctx.v_dim)
+             total_seqlen = dk.shape[0]
+         else:
+             # thd
+diff --git a/megatron/core/inference/contexts/dynamic_context.py b/megatron/core/inference/contexts/dynamic_context.py
+index 203bf4056..90ca12acf 100644
+--- a/megatron/core/inference/contexts/dynamic_context.py
++++ b/megatron/core/inference/contexts/dynamic_context.py
+@@ -65,10 +65,11 @@ except ImportError:
+     HAVE_FLASHINFER = False
+ 
+ try:
+-    from torch_memory_saver import torch_memory_saver
++    from torch_memory_saver import TorchMemorySaver
+ 
+-    # torch_memory_saver.hook_mode = "torch"
+-    HAVE_TORCH_MEMORY_SAVER = False
++    torch_memory_saver = TorchMemorySaver()
++    torch_memory_saver.hook_mode = "torch"
++    HAVE_TORCH_MEMORY_SAVER = True
+ except ImportError:
+     HAVE_TORCH_MEMORY_SAVER = False
+ 
+diff --git a/megatron/core/models/gpt/gpt_model.py b/megatron/core/models/gpt/gpt_model.py
+index 2adc23040..abafc09fd 100644
+--- a/megatron/core/models/gpt/gpt_model.py
++++ b/megatron/core/models/gpt/gpt_model.py
+@@ -558,6 +558,7 @@ class GPTModel(LanguageModule):
+         output_processor: Optional[Callable[..., Tensor]] = None,
+         output_processor_context: Optional[Any] = None,
+         witness_ids: Optional[Tensor] = None,
++        mtp_kwargs: Optional[dict] = None,
+     ) -> Tensor:
+         """Forward function of the GPT Model This function passes the input tensors
+         through the embedding layer, and then the decoder and finally into the post
+@@ -662,6 +663,7 @@ class GPTModel(LanguageModule):
+             mhc_multistream=mhc_multistream,
+             output_processor=output_processor,
+             output_processor_context=output_processor_context,
++            mtp_kwargs=mtp_kwargs,
+         )
+ 
+     def _postprocess(
+@@ -687,6 +689,7 @@ class GPTModel(LanguageModule):
+         mhc_multistream=None,
+         output_processor=None,
+         output_processor_context=None,
++        mtp_kwargs=None,
+     ):
+         """Postprocesses decoder hidden states to generate logits or compute loss.
+ 
+@@ -740,11 +743,13 @@ class GPTModel(LanguageModule):
+                 )
+ 
+         # logits and loss
++        mtp_labels = (mtp_kwargs or {}).get("mtp_labels")
++        compute_mtp_loss = labels is not None or mtp_labels is not None
+         output_weight = None
+         if self.share_embeddings_and_output_weights:
+             output_weight = self.shared_embedding_or_output_weight()
+ 
+-        if mtp_in_postprocess and not (in_inference_mode or is_spec_decode):
++        if mtp_in_postprocess and compute_mtp_loss and not (in_inference_mode or is_spec_decode):
+             hidden_states = self.mtp(
+                 input_ids=input_ids,
+                 position_ids=position_ids,
+@@ -772,7 +777,7 @@ class GPTModel(LanguageModule):
+                 # Cache decoder hidden states for serial MTP computation
+                 # after speculative token verification.
+                 self._decoder_hidden_states_cache = hidden_states
+-            else:
++            elif compute_mtp_loss:
+                 # In training/eval, use the utility function for processing MTP loss/scaling.
+                 hidden_states = process_mtp_loss(
+                     hidden_states=hidden_states,
+@@ -789,7 +794,7 @@ class GPTModel(LanguageModule):
+                     packed_seq_params=packed_seq_params,
+                     sequence_roll_context=sequence_roll_context,
+                     scale_logits_fn=self._scale_logits if self.config.use_mup else None,
+-                    input_ids=input_ids,
++                    input_ids=mtp_labels,
+                 )
+         sequence_parallel_override = False
+ 
+diff --git a/megatron/core/optimizer/distrib_optimizer.py b/megatron/core/optimizer/distrib_optimizer.py
+index c3c43db24..2010f6bd9 100644
+--- a/megatron/core/optimizer/distrib_optimizer.py
++++ b/megatron/core/optimizer/distrib_optimizer.py
+@@ -1333,6 +1333,11 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
+                     bucket_state = []
+                     for model_param, param_range_map in gbuf_range_map["param_map"].items():
+                         tensors = self._get_main_param_and_optimizer_states(model_param)
++                        if "step" in tensors:
++                            # Step is restored from optimizer param_groups. Keeping it in
++                            # bucket state makes it common checkpoint state whose list
++                            # skeleton depends on save-time optimizer placement.
++                            del tensors["step"]
+                         tensors.update(
+                             {
+                                 "gbuf_local_start": param_range_map["gbuf_local"].start,
+@@ -2185,6 +2190,11 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
+                     for src_tensors, (model_param, param_range_map) in zip(
+                         bucket_state, gbuf_range_map["param_map"].items()
+                     ):
++                        # Local metadata used for checkpoint merging/filtering, not optimizer state.
++                        src_tensors.pop('padding', None)
++                        # Step is restored from optimizer param_groups.
++                        src_tensors.pop('step', None)
++
+                         # Main param & optimizer states.
+                         self._set_main_param_and_optimizer_states(model_param, src_tensors)
+ 
+diff --git a/megatron/core/transformer/moe/moe_utils.py b/megatron/core/transformer/moe/moe_utils.py
+index ba218b9b6..3b7d330c1 100644
+--- a/megatron/core/transformer/moe/moe_utils.py
++++ b/megatron/core/transformer/moe/moe_utils.py
+@@ -799,21 +799,7 @@ def topk_routing_with_score_function(
+             # and therefore whose last ulp -- follows the order topk returns them in.
+             return torch.topk(scores, k=topk, dim=1)
+ 
+-    # miles rollout routing replay (R3): replays sglang rollout routing in the training
+-    # engine. This is miles' own mechanism and must take precedence — it is the active
+-    # path during miles training. MTP layers bypass R3. NVIDIA's inference-time
+-    # router_replay (megatron's own generation) is a separate pipeline used only when
+-    # the miles manager is not active, so it can never shadow R3.
+-    from miles.utils.replay_base import routing_replay_manager
+-
+-    if not is_mtp:
+-        _miles_topk = routing_replay_manager.get_topk_fn(_compute_topk, return_probs=True)
+-    else:
+-        _miles_topk = _compute_topk
+-
+     def compute_topk(scores, topk, num_groups=None, group_topk=None):
+-        if not is_mtp and routing_replay_manager.enabled:
+-            return _miles_topk(scores, topk, num_groups, group_topk)
+         if router_replay is not None:
+             return router_replay.get_replay_topk(
+                 scores, topk, num_groups, group_topk, _compute_topk
+diff --git a/megatron/core/transformer/moe/router.py b/megatron/core/transformer/moe/router.py
+index 74b09bfa9..363bd1321 100644
+--- a/megatron/core/transformer/moe/router.py
++++ b/megatron/core/transformer/moe/router.py
+@@ -275,15 +275,6 @@ class TopKRouter(Router):
+         if self.config.moe_enable_routing_replay:
+             self.router_replay = RouterReplay()
+ 
+-        # miles rollout routing replay (R3): register this router so the miles
+-        # routing_replay_manager can record/replay sglang rollout routing during
+-        # training. No-op (early return) unless miles enables the manager.
+-        from miles.utils.replay_base import routing_replay_manager
+-
+-        # replay only records main-decoder MoE layers; an MTP router would pop from an empty stream
+-        if not self.is_mtp_layer:
+-            routing_replay_manager.register_to_module(self, "routing_replay")
+-
+     def _maintain_float32_expert_bias(self):
+         """
+         Maintain the expert bias in float32.
+diff --git a/megatron/training/argument_utils.py b/megatron/training/argument_utils.py
+index a33cdcc05..c3c2fbbad 100644
+--- a/megatron/training/argument_utils.py
++++ b/megatron/training/argument_utils.py
+@@ -175,9 +175,7 @@ class ArgumentGroupFactory:
+         argparse_kwargs = {}
+         argparse_kwargs["arg_names"] = [self._format_arg_name(attribute.name)]
+         argparse_kwargs["dest"] = attribute.name
+-        argparse_kwargs["help"] = (
+-            self.field_docstrings[attribute.name] if attribute.name in self.field_docstrings else ""
+-        )
++        argparse_kwargs["help"] = self.field_docstrings.get(attribute.name, "").replace("%", "%%")
+ 
+         # dataclasses specifies that both should not be set
+         if isinstance(attribute.default, type(dataclasses.MISSING)):
+diff --git a/megatron/training/training.py b/megatron/training/training.py
+index d64ae8402..8daecfc18 100644
+--- a/megatron/training/training.py
++++ b/megatron/training/training.py
+@@ -219,13 +219,11 @@ except ImportError:
+     HAVE_FSDP2 = False
+ 
+ try:
+-    from torch_memory_saver import torch_memory_saver
++    from torch_memory_saver import TorchMemorySaver
+ 
+-    # Setting the global hook_mode here clobbers the LD_PRELOAD hook mode miles uses
+-    # for CUDA-IPC weight transfer; the only consumer below (idle-weight offload) is
+-    # unused by miles. Mirrors megatron/core/inference/contexts/dynamic_context.py.
+-    # torch_memory_saver.hook_mode = "torch"
+-    HAVE_TORCH_MEMORY_SAVER = False
++    torch_memory_saver = TorchMemorySaver()
++    torch_memory_saver.hook_mode = "torch"
++    HAVE_TORCH_MEMORY_SAVER = True
+ except ImportError:
+     HAVE_TORCH_MEMORY_SAVER = False
+ 
+@@ -2242,12 +2240,6 @@ def get_model(
+     # After TE2.x: Below function is an empty function and does nothing.
+     correct_amax_history_if_needed(model)
+ 
+-    # Miles allows selected parameters to opt out of Float16Module's global
+-    # bf16/fp16 cast. Restore those dtypes immediately after model materialization.
+-    from miles.backends.megatron_utils.fp32_param_utils import enforce_marked_param_dtypes
+-
+-    enforce_marked_param_dtypes(model)
+-
+     if wrap_with_ddp:
+         if args.use_torch_fsdp2:
+             assert HAVE_FSDP2, "Torch FSDP2 requires torch>=2.4.0"
