@@ -4,6 +4,7 @@ from vime.utils.model_config import load_hf_config
 
 from .common import load_model_hf_weights
 from .deepseek import deepseek_hf_tensor
+from .deepseek_v41 import deepseek_v41_hf_tensor
 from .glm import glm4_hf_tensor, glm4_moe_hf_tensor
 from .glm5_next import glm5_next_hf_tensor
 from .qwen import mimo_hf_tensor, minimax_m2_hf_tensor, qwen_hf_tensor, qwen_moe_hf_tensor
@@ -15,6 +16,7 @@ _LOADERS = {
     "glm5_next": glm5_next_hf_tensor,
     "deepseek_v3": deepseek_hf_tensor,
     "deepseek_v32": deepseek_hf_tensor,
+    "deepseek_v41": deepseek_v41_hf_tensor,
     "glm4": glm4_hf_tensor,
     "glm4_moe": glm4_moe_hf_tensor,
     "glm4_moe_lite": deepseek_hf_tensor,

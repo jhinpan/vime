@@ -194,6 +194,13 @@ def _set_default_megatron_args(args):
     elif not args.tokenizer_model:
         logger.info("--tokenizer-model not set, use --hf-checkpoint as tokenizer model.")
         args.tokenizer_model = args.hf_checkpoint
+
+    if args.spec and args.spec[0] == "vime_plugins.models.deepseek_v4_1.model":
+        # The attention variant selects Megatron's config contract, so it must be set before validation.
+        args.enable_hyper_connections = True
+        args.experimental_attention_variant = "dsv4"
+        args.dsv4_impl = "miles"
+        args.miles_dsa_topk_backend = getattr(args, "miles_dsa_topk_backend", None) or "canonical"
     return args
 
 

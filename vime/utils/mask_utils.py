@@ -217,6 +217,9 @@ class MultiTurnLossMaskGenerator:
         response = messages[-1]["content"]
         prompt_tokens = self.tokenizer(prompt, add_special_tokens=False)["input_ids"]
         response_tokens = self.tokenizer(response, add_special_tokens=False)["input_ids"]
+        # The response is tokenized from raw content, so it lacks the EOS that the template ends a turn with.
+        if self.tokenizer.eos_token_id is not None:
+            response_tokens.append(self.tokenizer.eos_token_id)
 
         response_length = len(response_tokens)
         token_ids = prompt_tokens + response_tokens

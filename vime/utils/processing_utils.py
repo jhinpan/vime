@@ -7,6 +7,8 @@ from pathlib import Path
 from PIL import Image
 from transformers import AutoProcessor, AutoTokenizer, PreTrainedTokenizerBase, ProcessorMixin
 
+from vime.utils.model_config import register_checkpoint_config
+
 logger = logging.getLogger(__name__)
 
 # Default image patch size for vision-language models
@@ -16,6 +18,7 @@ DEFAULT_PATCH_SIZE = 14
 
 
 def load_tokenizer(name_or_path: str, **kwargs):
+    register_checkpoint_config(name_or_path)
     tokenizer = AutoTokenizer.from_pretrained(name_or_path, **kwargs)
     template_path = Path(name_or_path) / "chat_template.json"
     if getattr(tokenizer, "chat_template", None) is None and template_path.is_file():

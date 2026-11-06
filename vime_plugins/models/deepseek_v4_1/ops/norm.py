@@ -1,0 +1,26 @@
+# Adapted from https://github.com/radixark/miles/blob/b133ce9cac3c8b4d9969d20d6a03117d545c2865/miles_plugins/models/deepseek_v4/ops/norm.py
+import torch
+import torch.nn as nn
+
+
+class RMSNorm(nn.Module):
+    """
+    Kept in pure PyTorch with FP32 weights to match SGLang's compressor norm.
+
+    Args:
+        dim: Dimension of the input tensor.
+        eps: Epsilon for numerical stability. Defaults to ``1e-6``.
+    """
+
+    def __init__(self, dim: int, eps: float = 1e-6):
+        super().__init__()
+        self.dim = dim
+        self.eps = eps
+        self.weight = nn.Parameter(torch.ones(dim, dtype=torch.float32))
+
+    def forward(self, x: torch.Tensor):
+        dtype = x.dtype
+        x = x.float()
+        var = x.square().mean(-1, keepdim=True)
+        x = x * torch.rsqrt(var + self.eps)
+        return (self.weight * x).to(dtype)

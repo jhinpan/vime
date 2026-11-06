@@ -11,7 +11,20 @@ def _normalize_glm5_next_gate(config_dict):
         linear["gate_lower_bound"] = -5.0 if linear["safe_gate"] else None
 
 
+def register_checkpoint_config(path) -> None:
+    """Register the config class of a checkpoint whose model_type Transformers does not know."""
+    try:
+        config_dict, _ = PretrainedConfig.get_config_dict(path)
+    except (OSError, ValueError):
+        return
+    if config_dict.get("model_type") == "deepseek_v41":
+        from vime_plugins.models.deepseek_v4_1.hf_config import register_hf_config_aliases
+
+        register_hf_config_aliases()
+
+
 def load_hf_config(path, **kwargs):
+    register_checkpoint_config(path)
     config_dict, _ = PretrainedConfig.get_config_dict(path, **kwargs)
     if config_dict.get("model_type") == "glm5_next":
         # Reuse the Transformers config schema used by vLLM for actor and rollout.

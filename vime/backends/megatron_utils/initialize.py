@@ -12,6 +12,8 @@ from megatron.core.num_microbatches_calculator import init_num_microbatches_calc
 from megatron.training.global_vars import _build_tokenizer, set_args
 from transformers.utils import HF_MODULES_CACHE
 
+from vime.utils.model_config import register_checkpoint_config
+
 logger = logging.getLogger(__name__)
 
 
@@ -82,6 +84,8 @@ def init(args):
         Path(HF_MODULES_CACHE).mkdir(parents=True, exist_ok=True)
         tokenizer_lock = FileLock(str(Path(HF_MODULES_CACHE) / "slime-tokenizer.lock"))
     with tokenizer_lock:
+        if args.tokenizer_model:
+            register_checkpoint_config(args.tokenizer_model)
         _build_tokenizer(args)
     # We won't use this. initialize to pass some validation in megatron.
     init_num_microbatches_calculator(
