@@ -1,0 +1,52 @@
+--- a/transformer_engine/common/gemm/rocm_gemm.cu
++++ b/transformer_engine/common/gemm/rocm_gemm.cu
+@@ -1687,7 +1687,7 @@
+   }
+ 
+   // D = alpha * (A * B) + beta * C
+-  NVTE_CHECK_HIPBLASLT(hipblasLtMatmul(handle,
++  hipblasStatus_t matmul_status = hipblasLtMatmul(handle,
+                                    operationDesc,
+                                    alpha_ptr,                              /* alpha */
+                                    param.A,                                      /* A */
+@@ -1702,7 +1702,39 @@
+                                    &cached_algo.algo.value(),              /* algo */
+                                    workspace,                              /* workspace */
+                                    workspaceSize,
+-                                   stream));                               /* stream */
++                                   stream);                                /* stream */
++  if (matmul_status != HIPBLAS_STATUS_SUCCESS) {
++    // hipBLASLt can return a heuristic solution that fails to run (ROCm/rocm-libraries#15320).
++    // Use the next candidate that runs and cache it for this GEMM config.
++    const int64_t failed_algo_id = GemmAlgoCache::Algo::getAlgoId(cached_algo.algo.value());
++    hipblasLtMatmulPreference_t retry_preference;
++    NVTE_CHECK_HIPBLASLT(hipblasLtMatmulPreferenceCreate(&retry_preference));
++    NVTE_CHECK_HIPBLASLT(hipblasLtMatmulPreferenceSetAttribute(
++        retry_preference, HIPBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES, &workspaceSize, sizeof(workspaceSize)));
++    int retry_count = 16;
++    std::vector<hipblasLtMatmulHeuristicResult_t> retry_algos(retry_count);
++    NVTE_CHECK_HIPBLASLT(hipblasLtMatmulAlgoGetHeuristic(handle, operationDesc, Adesc, Bdesc, Cdesc, Ddesc,
++                                                         retry_preference, retry_count, retry_algos.data(),
++                                                         &retry_count));
++    NVTE_CHECK_HIPBLASLT(hipblasLtMatmulPreferenceDestroy(retry_preference));
++    for (int i = 0; i < retry_count && matmul_status != HIPBLAS_STATUS_SUCCESS; i++) {
++      if (retry_algos[i].state != HIPBLAS_STATUS_SUCCESS ||
++          GemmAlgoCache::Algo::getAlgoId(retry_algos[i].algo) == failed_algo_id) {
++        continue;
++      }
++      matmul_status = hipblasLtMatmul(handle, operationDesc, alpha_ptr, param.A, Adesc, param.B, Bdesc, beta_ptr,
++                                      C, Cdesc, D, Ddesc, &retry_algos[i].algo, workspace, workspaceSize, stream);
++      if (matmul_status == HIPBLAS_STATUS_SUCCESS) {
++        cached_algo.algo = retry_algos[i].algo;
++        cached_algo.index = i;
++        cached_algo.algoId = GemmAlgoCache::Algo::getAlgoId(retry_algos[i].algo);
++        cached_algo.ws_size_min = retry_algos[i].workspaceSize;
++        cached_algo.ws_size_max = workspaceSize;
++        algoCache.store(gemm_cfg, cached_algo);
++      }
++    }
++  }
++  NVTE_CHECK_HIPBLASLT(matmul_status);
+ 
+   // Update FP8 scale-inv in output tensor
+   // Note: This is a WAR for the case when we have fp8 output but D->scale_inv is not allocated.

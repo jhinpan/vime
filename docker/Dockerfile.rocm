@@ -44,10 +44,14 @@ ENV NVTE_USE_ROCM=1
 ENV NVTE_USE_HIPBLASLT=1
 ENV NVTE_FRAMEWORK=pytorch
 
+# te_hipblaslt_retry.patch: ROCm 10 hipBLASLt can pick a GEMM solution that fails to run
+# (ROCm/rocm-libraries#15320); TE then tries the next heuristic candidate.
+COPY docker/amd_patch/${PATCH_VERSION}/te_hipblaslt_retry.patch /tmp/
 RUN --mount=type=cache,target=/root/.cache/ccache \
     git clone --depth 1 --branch ${TE_TAG} --recursive \
       https://github.com/ROCm/TransformerEngine.git /root/TransformerEngine && \
     cd /root/TransformerEngine && \
+    git apply /tmp/te_hipblaslt_retry.patch && rm /tmp/te_hipblaslt_retry.patch && \
     NVTE_ROCM_ARCH=${GPU_ARCH} NVTE_FUSED_ATTN=${NVTE_FUSED_ATTN} \
     MAX_JOBS=${TE_MAX_JOBS} \
     pip install . --no-build-isolation && \
